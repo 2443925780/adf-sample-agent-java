@@ -1,8 +1,5 @@
 package sample_team.module.complex;
 
-import static rescuecore2.standard.entities.StandardEntityURN.BUILDING;
-import static rescuecore2.standard.entities.StandardEntityURN.GAS_STATION;
-import static rescuecore2.standard.entities.StandardEntityURN.REFUGE;
 import adf.core.agent.communication.MessageManager;
 import adf.core.agent.communication.standard.bundle.MessageUtil;
 import adf.core.agent.communication.standard.bundle.centralized.CommandPolice;
@@ -24,7 +21,7 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
-import rescuecore2.standard.entities.Building;
+import rescuecore2.standard.entities.Blockade;
 import rescuecore2.standard.entities.PoliceForce;
 import rescuecore2.standard.entities.Road;
 import rescuecore2.standard.entities.StandardEntity;
@@ -33,15 +30,13 @@ import rescuecore2.worldmodel.EntityID;
 
 public class SamplePoliceTargetAllocator extends PoliceTargetAllocator {
 
-  private final Set<EntityID> priorityRoads;
-  private final Set<EntityID> targetRoads;
+  private final Set<EntityID> blockedRoads;
   private final Map<EntityID, PoliceForceInfo> agentInfoMap;
   private boolean initialized;
 
   public SamplePoliceTargetAllocator(AgentInfo ai, WorldInfo wi, ScenarioInfo si, ModuleManager moduleManager, DevelopData developData) {
     super(ai, wi, si, moduleManager, developData);
-    this.priorityRoads = new HashSet<>();
-    this.targetRoads = new HashSet<>();
+    this.blockedRoads = new HashSet<>();
     this.agentInfoMap = new HashMap<>();
     this.initialized = false;
   }
@@ -85,19 +80,9 @@ public class SamplePoliceTargetAllocator extends PoliceTargetAllocator {
   @Override
   public PoliceTargetAllocator calc() {
     this.initialize();
+    this.refreshBlockades();
     List<StandardEntity> availableAgents = this.getAvailableAgents();
-
-    this.assignTargets(availableAgents, this.priorityRoads);
-    this.assignTargets(availableAgents, this.targetRoads);
-
-    for (StandardEntity agent : availableAgents) {
-      EntityID target = this.getNearestRoad(agent);
-      if (target == null) {
-        break;
-      }
-      this.assign(agent.getID(), target);
-      this.targetRoads.remove(target);
-    }
+    this.assignTargets(availableAgents);
     return this;
   }
 
@@ -109,10 +94,15 @@ public class SamplePoliceTargetAllocator extends PoliceTargetAllocator {
       return this;
     }
     this.initialize();
+    this.refreshBlockades();
 
     for (CommunicationMessage message : messageManager
         .getReceivedMessageList(MessageRoad.class)) {
-      MessageUtil.reflectMessage(this.worldInfo, (MessageRoad) message);
+      MessageRoad road = (MessageRoad) message;
+      MessageUtil.reflectMessage(this.worldInfo, road);
+      if (road.isBlockadeDefined()) {
+        this.addBlockedRoad(road.getRoadID());
+      }
     }
     for (CommunicationMessage message : messageManager
         .getReceivedMessageList(CommandPolice.class)) {
@@ -120,8 +110,7 @@ public class SamplePoliceTargetAllocator extends PoliceTargetAllocator {
       if (command.isBroadcast()
           && command.getAction() == CommandPolice.ACTION_CLEAR
           && command.getTargetID() != null) {
-        this.priorityRoads.add(command.getTargetID());
-        this.targetRoads.add(command.getTargetID());
+        this.addBlockedRoad(command.getTargetID());
       }
     }
     for (CommunicationMessage message : messageManager
@@ -146,34 +135,6 @@ public class SamplePoliceTargetAllocator extends PoliceTargetAllocator {
         .getEntityIDsOfType(StandardEntityURN.POLICE_FORCE)) {
       this.agentInfoMap.computeIfAbsent(id, PoliceForceInfo::new);
     }
-
-    for (StandardEntity entity : this.worldInfo
-        .getEntitiesOfType(REFUGE, BUILDING, GAS_STATION)) {
-      if (!(entity instanceof Building)) {
-        continue;
-      }
-      Building building = (Building) entity;
-      if (building.getNeighbours() == null) {
-        continue;
-      }
-      for (EntityID neighbourID : building.getNeighbours()) {
-        StandardEntity neighbour = this.worldInfo.getEntity(neighbourID);
-        if (neighbour instanceof Road) {
-          this.targetRoads.add(neighbourID);
-          if (building.getStandardURN() == REFUGE) {
-            this.priorityRoads.add(neighbourID);
-          }
-        }
-      }
-    }
-
-    for (StandardEntity entity : this.worldInfo
-        .getEntitiesOfType(StandardEntityURN.ROAD)) {
-      Road road = (Road) entity;
-      if (road.isBlockadesDefined() && !road.getBlockades().isEmpty()) {
-        this.targetRoads.add(road.getID());
-      }
-    }
   }
 
 
@@ -194,46 +155,22 @@ public class SamplePoliceTargetAllocator extends PoliceTargetAllocator {
   }
 
 
-  private void assignTargets(List<StandardEntity> agents,
-      Set<EntityID> candidates) {
-    for (EntityID targetID : new ArrayList<>(candidates)) {
+  private void assignTargets(List<StandardEntity> agents) {
+    for (EntityID targetID : new ArrayList<>(this.blockedRoads)) {
       if (agents.isEmpty()) {
         return;
       }
       StandardEntity target = this.worldInfo.getEntity(targetID);
       if (!(target instanceof Road)) {
-        candidates.remove(targetID);
+        this.blockedRoads.remove(targetID);
         continue;
       }
 
       agents.sort(new DistanceSorter(this.worldInfo, target));
       StandardEntity agent = agents.remove(0);
-      this.priorityRoads.remove(targetID);
-      this.targetRoads.remove(targetID);
+      this.blockedRoads.remove(targetID);
       this.assign(agent.getID(), targetID);
     }
-  }
-
-
-  private EntityID getNearestRoad(StandardEntity agent) {
-    StandardEntity nearest = null;
-    double bestDistance = Double.MAX_VALUE;
-    for (EntityID id : new ArrayList<>(this.targetRoads)) {
-      StandardEntity entity = this.worldInfo.getEntity(id);
-      if (!(entity instanceof Road)) {
-        continue;
-      }
-      Road road = (Road) entity;
-      if (!road.isBlockadesDefined() || road.getBlockades().isEmpty()) {
-        continue;
-      }
-      double distance = this.worldInfo.getDistance(agent, road);
-      if (distance < bestDistance) {
-        bestDistance = distance;
-        nearest = road;
-      }
-    }
-    return nearest == null ? null : nearest.getID();
   }
 
 
@@ -251,6 +188,11 @@ public class SamplePoliceTargetAllocator extends PoliceTargetAllocator {
 
   private void updateAgent(MessagePoliceForce message) {
     MessageUtil.reflectMessage(this.worldInfo, message);
+    if (message.getTargetID() != null
+        && (message.getAction() == MessagePoliceForce.ACTION_CLEAR
+            || message.getAction() == MessagePoliceForce.ACTION_MOVE)) {
+      this.addBlockedRoad(message.getTargetID());
+    }
     PoliceForceInfo info = this.agentInfoMap.get(message.getAgentID());
     if (info == null) {
       info = new PoliceForceInfo(message.getAgentID());
@@ -297,11 +239,38 @@ public class SamplePoliceTargetAllocator extends PoliceTargetAllocator {
       return;
     }
     StandardEntity target = this.worldInfo.getEntity(info.target);
-    if (!(target instanceof Road) || !((Road) target).isBlockadesDefined()
-        || !((Road) target).getBlockades().isEmpty()) {
-      this.targetRoads.add(info.target);
+    if (target instanceof Road && (!((Road) target).isBlockadesDefined()
+        || !((Road) target).getBlockades().isEmpty())) {
+      this.blockedRoads.add(info.target);
     }
     info.target = null;
+  }
+
+
+  private void refreshBlockades() {
+    for (StandardEntity entity : this.worldInfo
+        .getEntitiesOfType(StandardEntityURN.ROAD)) {
+      Road road = (Road) entity;
+      if (road.isBlockadesDefined() && !road.getBlockades().isEmpty()) {
+        this.blockedRoads.add(road.getID());
+      } else if (road.isBlockadesDefined()
+          && road.getBlockades().isEmpty()) {
+        this.blockedRoads.remove(road.getID());
+      }
+    }
+  }
+
+
+  private void addBlockedRoad(EntityID targetID) {
+    StandardEntity entity = this.worldInfo.getEntity(targetID);
+    if (entity instanceof Road) {
+      this.blockedRoads.add(targetID);
+    } else if (entity instanceof Blockade) {
+      Blockade blockade = (Blockade) entity;
+      if (blockade.isPositionDefined()) {
+        this.blockedRoads.add(blockade.getPosition());
+      }
+    }
   }
 
 
